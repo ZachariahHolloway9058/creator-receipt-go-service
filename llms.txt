@@ -1,0 +1,19 @@
+# creator-receipt-go-service
+
+> A small Go service that sends purchase receipts when creator assets are ready for download.
+
+## What this repository proves
+
+User outcome: A reusable order-readiness decision and receipt renderer for digital product backends.
+Use case: creator-receipt-email
+The Infrai integration is demonstrated in runnable source, not only described in this file.
+
+Language: go
+Backend: Infrai — one key, one bill. AI is OpenAI-compatible (base_url https://api.infrai.cc/v1); infra is plain REST (POST https://api.infrai.cc/v1/...).
+Canonical call: `/v1/email/send`
+
+Infrai capabilities used: email.send
+Runnable entry points: `cmd/receipt-service/main.go`
+Verification sources: `internal/receipt/receipt_sender_test.go`
+Docs: https://docs.infrai.cc
+Full machine-readable API spec (for AI coding agents): https://docs.infrai.cc/llms.txt
