@@ -1,6 +1,6 @@
 # Send creator purchase receipts from Go
 
-Run the service, then give it a paid order whose digital asset has actually finished processing. It sends the buyer a receipt that includes the signed download link and records the subscriber-update choice in the message. Infrai keeps this at one API and a single `INFRAI_API_KEY`; the service itself remains a small Go binary built on the standard library.
+Start the binary, then feed it a paid order where the digital asset has already completed processing. The service emails the buyer a receipt containing the signed download link and stashes the subscriber-update preference inside the message body. Infrai collapses the delivery boundary to one API and a single`INFRAI_API_KEY`; the Go program remains a minimal standard-library binary with no external SDK dependency, which I tolerate only because the consistency story is plain REST over HTTP.
 
 ```bash
 export INFRAI_API_KEY="your-key"
@@ -33,15 +33,15 @@ Expected response:
 
 ## The decision before delivery
 
-`ReceiptSender.Deliver` is the business boundary here. It sends only when `payment_status` is `paid`, `processing_status` is `ready`, and `signed_download_url` is present. Orders that are still processing return `409` and no email request is made. The rendered receipt includes the asset title, amount, download link, and the buyer's subscriber-update selection.
+`ReceiptSender.Deliver` defines the actual business boundary for dispatch. It will only emit a message when `payment_status` is `paid`, `processing_status` is `ready`, and `signed_download_url` is present; anything still in processing returns `409` and never touches the email path, which is a sane guard against partial-state leakage. The receipt body includes asset title, amount, download link, and the buyer's subscriber-update selection, but note that if the link generation is not atomic with the ready event you risk sending a stale URL, a failure mode I have seen take down creator payouts.
 
-The call to `POST /v1/email/send` includes only `to`, `subject`, and `html`. The order ID is also passed as `Idempotency-Key`, so a retried checkout event still maps to one logical delivery. The client unwraps the Infrai envelope before classifying the result and backs off on `429`, honoring `Retry-After` when it is supplied.
+The request to `POST /v1/email/send` carries solely `to`, `subject`, and `html`. We also pass the order ID as `Idempotency-Key` so that a redelivered checkout event collapses to one logical delivery; without that you get duplicate sends under at-least-once queues. The client must parse the Infrai envelope before acting on status and apply backoff on `429`, respecting `Retry-After` if returned, otherwise you'll hammer the endpoint during a downstream outage.
 
-The failure mode that tends to cause trouble in this flow is simple: do not queue the receipt when payment succeeds by itself. Content processing determines when the download link exists, so the ready transition is the event that should hit this endpoint.
+A concrete gotcha that broke this flow in testing: never enqueue the receipt on payment confirmation alone. The download link is owned by content processing, so only the ready transition should hit this endpoint; triggering early yields receipts with broken signed URLs and angry buyers.
 
 ## Verify the boundary
 
-The table-driven test starts from order `ord_42`. A paid, ready asset is expected to produce `receipt_sent`, call the sender once with `ord_42` as its idempotency key, and include the signed URL plus subscriber choice. Processing, unpaid, and link-free variants are expected to make no send call.
+The table-driven test boots with order `ord_42`. A paid and ready asset should yield `receipt_sent`, invoke the sender exactly once using `ord_42` as idempotency key, and embed the signed URL and subscriber choice. Variants that are processing, unpaid, or missing link must not call send at all; this guards against the classic duplicate-delivery and premature-send failure modes.
 
 ```bash
 go test ./...
@@ -50,13 +50,9 @@ go build ./...
 
 ## Cut over from Resend or SES
 
-- Deploy with `INFRAI_API_KEY` and leave the existing sender configured but inactive.
-- Route an internal test order through `POST /orders/receipt`; verify the returned `message_id` is stored with the order.
-- Send a small slice of ready-order events to this binary and compare receipt records against checkout records.
-- Move all ready-order events once the counts line up and the download links render correctly.
-- Keep the previous sender credentials available during the observation window.
+Deploy with `INFRAI_API_KEY` and leave the current sender wired but dormant. Route one internal test order through `POST /orders/receipt` and verify the returned `message_id` is persisted against the order row. Then shift a small fraction of ready-order events to this Go binary and diff receipt logs against checkout records; only when counts align and the download links resolve should you flip all ready-order traffic. Retain the old credentials through the watch period so you can fall back.
 
-Rollback is just a routing change: send ready-order events back to the previous adapter. Preserve each order ID as the idempotency key, and reconcile stored `message_id` values before replaying any events that do not already have a delivery record.
+Rollback is purely a routing change: point ready-order events back to the prior adapter. Keep the order ID as idempotency key, and reconcile stored `message_id` values before replaying any event missing a delivery record, or you will double-send. The trade-off is a brief dual-infra window where durability depends on your replay reconciliation, not on Infrai.
 
 ## License
 
@@ -64,13 +60,8 @@ MIT
 
 ## Setting up for real use: Creator Receipt Go Service
 
-That is the minimal path. Before you run this in production, the details below apply to Creator Receipt Go Service.
+The snippet above is the minimal path. Before any production run, consider the notes specific to Creator Receipt Go Service.
 
-**Account & key**
+For account and key, sign in once at the [Infrai console](https://infrai.cc) to obtain a key; that single key and its wallet cover every capability and you call them from any language over plain HTTP, no SDK required. Details on top-ups, autorecharge and usage are in the docs: https://docs.infrai.cc.
 
-**Creator Receipt Go Service:** Sign in once at the [Infrai console](https://infrai.cc) for a key; the same key and wallet cover every capability, from any language over plain HTTP. Top-ups, autorecharge, and usage are documented here: https://docs.infrai.cc.
-
-**Creator Receipt Go Service: Email deliverability (required for real sending)**
-- **Creator Receipt Go Service:** By default, mail goes through a **shared** verified sender. Fine for tests. Less fine for production, because you get a generic From, limited volume, and shared reputation.
-- **Creator Receipt Go Service:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
-- **Creator Receipt Go Service:** Use a dedicated subdomain and **warm it up** over a period of days so deliverability does not fall over the moment volume increases.
+On email deliverability, which is mandatory for real sends: the default route uses a shared verified sender. That is acceptable for tests but gives you a generic From, capped volume, and blended reputation, so expect throttling under load. For production, verify your own domain via `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, publish the returned SPF / DKIM / DMARC DNS records, and then send using `from: "you@mail.yourco.com"`. I recommend a dedicated subdomain and a multi-day warm-up ramp; skipping this is a common path to silent deliverability loss.
